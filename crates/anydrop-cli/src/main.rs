@@ -184,6 +184,7 @@ async fn receive(
         device: me,
         accept,
         progress: Some(receive_progress()),
+        max_total_size: None,
     });
 
     let on_result = Arc::new(|remote: SocketAddr, r: Result<ConnOutcome>| match r {

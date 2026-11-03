@@ -300,6 +300,26 @@ pub struct ReceiverConfig {
     pub device: DeviceInfo,
     pub accept: AcceptFn,
     pub progress: Option<ProgressFn>,
+    /// Reject offers whose total size exceeds this many bytes. `None` = no limit.
+    pub max_total_size: Option<u64>,
+}
+
+/// Free space that must remain on the destination volume after a transfer.
+pub const DISK_HEADROOM: u64 = 100 * 1024 * 1024;
+/// `Reject` reason when the destination volume is too small.
+pub const REJECT_DISK_SPACE: &str = "insufficient disk space";
+/// `Reject` reason when the offer exceeds [`ReceiverConfig::max_total_size`].
+pub const REJECT_TOO_LARGE: &str = "max receive size exceeded";
+
+/// Available bytes on the volume that will hold `dir` (which may not exist yet).
+fn available_space_for(dir: &Path) -> Option<u64> {
+    let mut p = dir;
+    loop {
+        if p.exists() {
+            return fs4::available_space(p).ok();
+        }
+        p = p.parent()?;
+    }
 }
 
 #[derive(Debug)]
@@ -409,7 +429,11 @@ pub async fn handle_connection(
             }
         }
     }
-    if files.iter().map(|f| f.size).sum::<u64>() != total_size {
+    // checked_add: crafted sizes must not wrap around and slip past the limits below.
+    let declared = files
+        .iter()
+        .try_fold(0u64, |acc, f| acc.checked_add(f.size));
+    if declared != Some(total_size) {
         write_msg(
             &mut wr,
             &Message::Reject {
@@ -419,6 +443,37 @@ pub async fn handle_connection(
         .await
         .ok();
         bail!("inconsistent offer");
+    }
+
+    // Policy checks, before bothering the user with a dialog. Only the short reason
+    // goes to the peer; the details (limits, free space) stay in the local log.
+    let rejection = match cfg.max_total_size {
+        Some(max) if total_size > max => Some((
+            REJECT_TOO_LARGE,
+            format!("{total_size} bytes offered, limit is {max}"),
+        )),
+        _ => None,
+    }
+    .or_else(|| {
+        available_space_for(&cfg.dest_dir)
+            .filter(|avail| total_size.saturating_add(DISK_HEADROOM) > *avail)
+            .map(|avail| {
+                (
+                    REJECT_DISK_SPACE,
+                    format!("{total_size} bytes offered, {avail} available"),
+                )
+            })
+    });
+    if let Some((reason, detail)) = rejection {
+        write_msg(
+            &mut wr,
+            &Message::Reject {
+                reason: reason.into(),
+            },
+        )
+        .await
+        .ok();
+        bail!("offer from {} rejected: {reason} ({detail})", peer.name);
     }
 
     let req = OfferRequest {

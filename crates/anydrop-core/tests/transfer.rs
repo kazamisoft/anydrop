@@ -15,6 +15,14 @@ use unicode_normalization::UnicodeNormalization;
 type Results = Arc<Mutex<Vec<anyhow::Result<ConnOutcome>>>>;
 
 async fn start_receiver(dest: &Path, accept: AcceptFn) -> (SocketAddr, Results) {
+    start_receiver_with_limit(dest, accept, None).await
+}
+
+async fn start_receiver_with_limit(
+    dest: &Path,
+    accept: AcceptFn,
+    max_total_size: Option<u64>,
+) -> (SocketAddr, Results) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let cfg = Arc::new(ReceiverConfig {
@@ -22,6 +30,7 @@ async fn start_receiver(dest: &Path, accept: AcceptFn) -> (SocketAddr, Results) 
         device: DeviceInfo::local(Some("receiver".into())),
         accept,
         progress: None,
+        max_total_size,
     });
     let results: Results = Arc::default();
     let r2 = results.clone();
@@ -390,4 +399,101 @@ async fn browser_tracks_peers_appearing_and_leaving() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(gone, "peer was not removed after goodbye");
+}
+
+#[tokio::test]
+async fn offer_over_max_size_is_rejected_without_asking() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("big.bin"), vec![7u8; 1000]).unwrap();
+    std::fs::write(src.path().join("ok.bin"), vec![7u8; 999]).unwrap();
+
+    let asked = Arc::new(AtomicU64::new(0));
+    let a2 = asked.clone();
+    let accept: AcceptFn = Arc::new(move |_| {
+        a2.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { true })
+    });
+    let (addr, results) = start_receiver_with_limit(dst.path(), accept, Some(999)).await;
+    let me = DeviceInfo::local(None);
+
+    // 1 byte over the limit: rejected before the user is asked, nothing written.
+    let big = collect_files(&[src.path().join("big.bin")]).unwrap();
+    let out = send_files(addr, &me, &big, None).await.unwrap();
+    assert_eq!(out, SendOutcome::Rejected(REJECT_TOO_LARGE.into()));
+    assert_eq!(asked.load(Ordering::Relaxed), 0);
+    assert!(list_files(dst.path()).is_empty());
+    wait_results(&results, 1).await;
+    let err = results.lock().unwrap()[0].as_ref().unwrap_err().to_string();
+    assert!(err.contains(REJECT_TOO_LARGE), "{err}");
+
+    // Exactly at the limit: accepted.
+    let ok = collect_files(&[src.path().join("ok.bin")]).unwrap();
+    let out = send_files(addr, &me, &ok, None).await.unwrap();
+    assert_eq!(
+        out,
+        SendOutcome::Completed {
+            files: 1,
+            bytes: 999
+        }
+    );
+    assert_eq!(asked.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn offer_larger_than_free_disk_space_is_rejected() {
+    let dst = tempfile::tempdir().unwrap();
+    let (addr, _) = start_receiver(dst.path(), auto_accept()).await;
+    // 1 EiB: no test machine has that much free space.
+    let files = vec![FileEntry {
+        path: "huge.bin".into(),
+        size: 1 << 60,
+    }];
+    let reply = raw_sender(addr, files, b"", "", false).await;
+    assert_eq!(
+        reply,
+        Some(Message::Reject {
+            reason: REJECT_DISK_SPACE.into()
+        })
+    );
+    assert!(list_files(dst.path()).is_empty());
+}
+
+#[tokio::test]
+async fn overflowing_file_sizes_are_rejected() {
+    let dst = tempfile::tempdir().unwrap();
+    let (addr, _) = start_receiver_with_limit(dst.path(), auto_accept(), Some(1 << 20)).await;
+    let s = TcpStream::connect(addr).await.unwrap();
+    let (mut rd, mut wr) = s.into_split();
+    let hello = Message::Hello {
+        version: PROTOCOL_VERSION,
+        device: DeviceInfo::local(None),
+    };
+    write_msg(&mut wr, &hello).await.unwrap();
+    read_msg(&mut rd).await.unwrap();
+    // u64::MAX + 2 wraps to 1: must not be mistaken for a 1-byte offer.
+    let files = vec![
+        FileEntry {
+            path: "a".into(),
+            size: u64::MAX,
+        },
+        FileEntry {
+            path: "b".into(),
+            size: 2,
+        },
+    ];
+    write_msg(
+        &mut wr,
+        &Message::Offer {
+            files,
+            total_size: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        read_msg(&mut rd).await.unwrap(),
+        Message::Reject { .. }
+    ));
+    assert!(list_files(dst.path()).is_empty());
 }

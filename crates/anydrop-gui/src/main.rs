@@ -263,6 +263,7 @@ impl AnyDropApp {
             device: self.me.clone(),
             accept: self.accept_fn(),
             progress: Some(self.progress_fn(false)),
+            max_total_size: None,
         });
         let shared = self.shared.clone();
         let ctx = self.ctx.clone();
