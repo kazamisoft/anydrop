@@ -49,7 +49,7 @@ impl Tray {
         ])
         .ok()?;
 
-        let (rgba, w, h) = crate::app_icon_rgba(32);
+        let (rgba, w, h) = crate::icon::app_icon_rgba(32);
         let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))

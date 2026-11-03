@@ -7,6 +7,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod icon;
 mod settings;
 mod tray;
 
@@ -41,7 +42,7 @@ fn main() -> eframe::Result {
             .with_min_inner_size([640.0, 420.0])
             .with_drag_and_drop(true)
             .with_icon(Arc::new({
-                let (rgba, width, height) = app_icon_rgba(64);
+                let (rgba, width, height) = icon::app_icon_rgba(64);
                 egui::IconData {
                     rgba,
                     width,
@@ -1151,39 +1152,35 @@ fn install_fonts(ctx: &egui::Context) {
     }
 }
 
-/// App / tray icon drawn in code (no asset files): blue disc with a white down arrow.
-pub(crate) fn app_icon_rgba(size: u32) -> (Vec<u8>, u32, u32) {
-    let n = size as f32;
-    let mut px = vec![0u8; (size * size * 4) as usize];
-    for y in 0..size {
-        for x in 0..size {
-            let (u, v) = ((x as f32 + 0.5) / n, (y as f32 + 0.5) / n);
-            let d = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt();
-            // anti-aliased disc
-            let disc = ((0.48 - d) * n).clamp(0.0, 1.0);
-            if disc <= 0.0 {
-                continue;
-            }
-            let stem = (u - 0.5).abs() < 0.07 && (0.20..0.58).contains(&v);
-            let head = (0.50..=0.78).contains(&v) && (u - 0.5).abs() <= (0.78 - v) * 0.95;
-            let bar = (0.80..0.86).contains(&v) && (u - 0.5).abs() < 0.22;
-            let (r, g, b) = if stem || head || bar {
-                (255, 255, 255)
-            } else {
-                (0x2f, 0x80, 0xed)
-            };
-            let i = ((y * size + x) * 4) as usize;
-            px[i..i + 4].copy_from_slice(&[r, g, b, (disc * 255.0) as u8]);
-        }
-    }
-    (px, size, size)
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
+    fn ico_container_is_valid() {
+        let sizes = [16, 32, 256];
+        let ico = super::icon::ico_bytes(&sizes);
+        assert_eq!(
+            &ico[0..6],
+            &[0, 0, 1, 0, 3, 0],
+            "ICONDIR: reserved, type=icon, count=3"
+        );
+        for (i, s) in sizes.iter().enumerate() {
+            let e = &ico[6 + i * 16..6 + (i + 1) * 16];
+            let dim = if *s == 256 { 0 } else { *s as u8 };
+            assert_eq!((e[0], e[1]), (dim, dim));
+            let len = u32::from_le_bytes(e[8..12].try_into().unwrap()) as usize;
+            let off = u32::from_le_bytes(e[12..16].try_into().unwrap()) as usize;
+            assert!(off + len <= ico.len());
+            assert_eq!(
+                u32::from_le_bytes(ico[off..off + 4].try_into().unwrap()),
+                40,
+                "BITMAPINFOHEADER"
+            );
+        }
+    }
+
+    #[test]
     fn icon_shape() {
-        let (px, w, h) = super::app_icon_rgba(64);
+        let (px, w, h) = super::icon::app_icon_rgba(64);
         assert_eq!((w, h, px.len()), (64, 64, 64 * 64 * 4));
         let at = |x: u32, y: u32| &px[((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize];
         assert_eq!(at(0, 0)[3], 0, "corner is transparent");

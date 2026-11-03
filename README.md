@@ -17,7 +17,7 @@ cargo build --release            # CLI(anydrop) + GUI(anydrop-gui) 함께 빌드
 
 | OS | 실행 |
 |---|---|
-| Windows | `target\release\anydrop-gui.exe` 더블클릭 (콘솔 창 없음) |
+| Windows | `target\release\anydrop-gui.exe` 더블클릭 (콘솔 창 없음, 실행파일 아이콘·버전 정보 포함 — `crates/anydrop-gui/build.rs`) |
 | macOS | `./scripts/macos-app.sh` → `target/AnyDrop.app` 생성(ad-hoc 서명, 로컬 네트워크 권한 문구 포함) → `cp -R target/AnyDrop.app /Applications/` |
 
 - 실행하면 바로 **수신 대기** + 주변 기기 자동 검색(LAN mDNS + Tailscale, 15초마다)
