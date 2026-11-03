@@ -9,6 +9,20 @@ anydrop list                    # 주변 기기 찾기 (LAN + Tailscale)
 anydrop send MacBook a.pdf dir/ # 보내는 쪽: 이름/IP/Tailscale 호스트명으로 전송
 ```
 
+## 다운로드
+
+[Releases](https://github.com/kazamisoft/anydrop/releases) 페이지에서 받을 수 있습니다.
+
+| 파일 | 내용 |
+|---|---|
+| `anydrop-windows-x64.zip` / `anydrop-windows-arm64.zip` | `anydrop-gui.exe`(GUI), `anydrop.exe`(CLI) |
+| `anydrop-macos-universal.app.zip` | `AnyDrop.app` (Intel + Apple Silicon) |
+| `anydrop-macos-universal.tar.gz` | `anydrop` CLI (Intel + Apple Silicon) |
+| `anydrop-linux-x64.tar.gz` | `anydrop`(CLI), `anydrop-gui`(GUI, 트레이 없음) |
+
+서명되지 않은 바이너리입니다. Windows는 SmartScreen에서 "추가 정보 → 실행",
+macOS는 `xattr -dr com.apple.quarantine /Applications/AnyDrop.app` 후 실행하세요.
+
 ## GUI (권장)
 
 ```bash
@@ -115,6 +129,17 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 `.github/workflows/build.yml`이 push마다 Windows x64/ARM64, macOS arm64/x64/universal, Linux 바이너리를 만들어 Artifacts로 올립니다.
 (macOS 바이너리는 리눅스에서 링크할 수 없으므로 CI 또는 맥에서 빌드하세요.)
+
+### 릴리스
+
+`.github/workflows/release.yml`은 `v*` 태그를 push하면 위 "다운로드"의 파일들을 만들어 GitHub Release에 올립니다.
+태그는 `Cargo.toml`의 workspace 버전과 같아야 합니다(다르면 실패).
+
+```bash
+# 1) Cargo.toml [workspace.package] version 을 올리고 커밋한 뒤
+git tag v0.1.1
+git push origin v0.1.1
+```
 
 ## 첫 실행 시 OS 설정
 

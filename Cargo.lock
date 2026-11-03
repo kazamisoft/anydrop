@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "anydrop-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anydrop-core",
  "anyhow",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "anydrop-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "fs4",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "anydrop-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anydrop-core",
  "anyhow",

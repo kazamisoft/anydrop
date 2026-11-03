@@ -1,0 +1,145 @@
+name: release
+
+# Push a tag such as v0.1.1 to publish a GitHub Release with packaged binaries.
+# The tag must match the workspace version in Cargo.toml.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v0.1.1"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Tag matches Cargo.toml version
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::tag $TAG does not match workspace version $version (expected v$version)"
+            exit 1
+          fi
+
+  windows:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, asset: anydrop-windows-x64.zip }
+          - { target: aarch64-pc-windows-msvc, asset: anydrop-windows-arm64.zip }
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p anydrop-cli -p anydrop-gui
+      - name: Package
+        shell: pwsh
+        run: |
+          $dir = "target/${{ matrix.target }}/release"
+          Compress-Archive -Path "$dir/anydrop.exe", "$dir/anydrop-gui.exe" -DestinationPath "${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  linux:
+    needs: verify
+    # Older Ubuntu = older glibc requirement, so the binaries run on more distros.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --all --locked
+      - name: Build
+        run: cargo build --release --locked -p anydrop-cli -p anydrop-gui
+      - name: Package
+        # tar keeps the executable bit.
+        run: tar -czf anydrop-linux-x64.tar.gz -C target/release anydrop anydrop-gui
+      - uses: actions/upload-artifact@v5
+        with:
+          name: anydrop-linux-x64.tar.gz
+          path: anydrop-linux-x64.tar.gz
+
+  macos:
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build universal AnyDrop.app
+        run: ./scripts/macos-app.sh universal
+      - name: Universal CLI
+        run: |
+          cargo build --release --locked -p anydrop-cli --target x86_64-apple-darwin
+          cargo build --release --locked -p anydrop-cli --target aarch64-apple-darwin
+          lipo -create -output target/anydrop \
+            target/x86_64-apple-darwin/release/anydrop target/aarch64-apple-darwin/release/anydrop
+          lipo -info target/anydrop
+      - name: Package
+        run: |
+          ditto -c -k --keepParent target/AnyDrop.app anydrop-macos-universal.app.zip
+          tar -czf anydrop-macos-universal.tar.gz -C target anydrop
+      - uses: actions/upload-artifact@v5
+        with:
+          name: anydrop-macos
+          path: |
+            anydrop-macos-universal.app.zip
+            anydrop-macos-universal.tar.gz
+
+  release:
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          draft: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/anydrop-windows-x64.zip
+            dist/anydrop-windows-arm64.zip
+            dist/anydrop-macos-universal.app.zip
+            dist/anydrop-macos-universal.tar.gz
+            dist/anydrop-linux-x64.tar.gz
+          body: |
+            > **서명되지 않은 바이너리입니다.**
+            > - Windows: SmartScreen 경고가 뜨면 "추가 정보 → 실행"
+            > - macOS: 압축을 풀어 `/Applications`로 옮긴 뒤 `xattr -dr com.apple.quarantine /Applications/AnyDrop.app`
+            >   (CLI: `xattr -d com.apple.quarantine ./anydrop`)
+            >
+            > 보안 관련 주의사항은 [SECURITY.md](https://github.com/${{ github.repository }}/blob/${{ env.TAG }}/SECURITY.md)를 참고하세요.
