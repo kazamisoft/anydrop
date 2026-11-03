@@ -278,6 +278,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tray-icon",
  "winresource",

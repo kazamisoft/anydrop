@@ -29,6 +29,8 @@ cargo build --release            # CLI(anydrop) + GUI(anydrop-gui) 함께 빌드
   트레이 메뉴: 열기 · 받은 폴더 열기 · 자동 수락 · 종료 (Windows는 아이콘 왼쪽 클릭으로도 열림).
   숨겨진 상태에서 받기 요청이 오면 창이 자동으로 앞에 뜹니다.
   설정 → "시작할 때 트레이로 숨긴 채 실행" 또는 `anydrop-gui --hidden`
+- **중복 실행 방지**: 이미 실행 중이면 새로 뜨지 않고 "이미 실행 중" 안내 후, 실행 중인 창을 앞으로 가져옵니다
+  (두 번째 실행에 넘긴 파일은 실행 중인 창의 보낼 목록에 추가됨). 잠금: `<설정 폴더>/AnyDrop/instance.lock`
 - 설정 파일: Windows `%APPDATA%\AnyDrop\settings.json`, macOS `~/Library/Application Support/AnyDrop/settings.json`
 
 > macOS에서 직접 빌드한 바이너리를 그대로 실행하면 방화벽이 들어오는 연결을 끊을 수 있습니다

@@ -11,6 +11,7 @@
 mod icns;
 mod icon;
 mod settings;
+mod single;
 mod tray;
 
 use anydrop_core::discovery::{Advertiser, Browser};
@@ -37,6 +38,23 @@ const TS_RESCAN_EVERY: Duration = Duration::from_secs(60);
 const TS_STALE_AFTER: Duration = Duration::from_secs(180);
 
 fn main() -> eframe::Result {
+    // Paths passed on the command line (e.g. "Send with AnyDrop" menu) are pre-selected.
+    let files: Vec<PathBuf> = std::env::args_os()
+        .skip(1)
+        .filter(|a| !a.to_string_lossy().starts_with("--"))
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+
+    // Only one AnyDrop per user: a second launch wakes the running one and exits.
+    let instance = match single::acquire(&files) {
+        single::Acquire::Primary(p) => p,
+        single::Acquire::AlreadyRunning { notified } => {
+            single::tell_already_running(notified);
+            return Ok(());
+        }
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("AnyDrop")
@@ -58,7 +76,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "AnyDrop",
         options,
-        Box::new(|cc| Ok(Box::new(AnyDropApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(AnyDropApp::new(cc, instance, files)))),
     )
 }
 
@@ -83,6 +101,8 @@ struct Shared {
     offers: VecDeque<PendingOffer>,
     sending: Option<(String, Option<Progress>)>,
     clear_files: bool,
+    /// Another launch asked us to come to the front (with optional files to add).
+    show_requests: Vec<Vec<PathBuf>>,
     receiving: Option<Progress>,
     log: Vec<LogLine>,
     receiver_status: String,
@@ -136,10 +156,16 @@ struct AnyDropApp {
     /// Tray "Quit" was chosen: let the close request through.
     quitting: bool,
     tooltip: String,
+    /// Holds the single-instance lock until the app exits.
+    _instance: single::PrimaryInstance,
 }
 
 impl AnyDropApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        mut instance: single::PrimaryInstance,
+        files: Vec<PathBuf>,
+    ) -> Self {
         install_fonts(&cc.egui_ctx);
         let settings = Settings::load();
         let me = DeviceInfo::local(Some(settings.name.clone()));
@@ -156,12 +182,7 @@ impl AnyDropApp {
             me,
             receiver: None,
             // Paths passed on the command line (e.g. "Send with AnyDrop" menu) are pre-selected.
-            files: std::env::args_os()
-                .skip(1)
-                .filter(|a| !a.to_string_lossy().starts_with("--"))
-                .map(PathBuf::from)
-                .filter(|p| p.exists())
-                .collect(),
+            files,
             selected: None,
             manual_addr: String::new(),
             manual_peers: Vec::new(),
@@ -173,7 +194,17 @@ impl AnyDropApp {
             hide_on_start: false,
             quitting: false,
             tooltip: String::new(),
+            _instance: single::PrimaryInstance::placeholder(),
         };
+        {
+            let shared = app.shared.clone();
+            let ctx = cc.egui_ctx.clone();
+            instance.listen(move |paths| {
+                shared.lock().unwrap().show_requests.push(paths);
+                ctx.request_repaint();
+            });
+        }
+        app._instance = instance;
         app.tray = Tray::new(&cc.egui_ctx, app.settings.auto_accept);
         app.hide_on_start = app.tray.is_some()
             && (app.settings.start_hidden || std::env::args().any(|a| a == "--hidden"));
@@ -527,10 +558,15 @@ impl AnyDropApp {
     }
 
     fn show_window(&mut self, ctx: &egui::Context) {
-        self.hidden = false;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        // Only re-map a hidden window: sending Visible(true) to a visible one makes
+        // some window systems re-create it without a fresh frame (blank window).
+        if std::mem::take(&mut self.hidden) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+        ctx.request_repaint_after(Duration::from_millis(150));
     }
 
     fn hide_window(&mut self, ctx: &egui::Context) {
@@ -570,6 +606,16 @@ impl eframe::App for AnyDropApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if std::mem::take(&mut self.hide_on_start) {
             self.hide_window(ctx);
+        }
+
+        let requests = std::mem::take(&mut self.shared.lock().unwrap().show_requests);
+        for paths in requests {
+            for p in paths {
+                if !self.files.contains(&p) {
+                    self.files.push(p);
+                }
+            }
+            self.show_window(ctx);
         }
 
         let actions = self
