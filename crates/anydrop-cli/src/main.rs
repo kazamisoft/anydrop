@@ -203,7 +203,13 @@ async fn receive(
         }
         Ok(ConnOutcome::Rejected(peer)) => println!("✘ declined offer from {}", peer.name),
         Ok(ConnOutcome::Probe(_)) => {}
-        Err(e) => eprintln!("✘ transfer from {remote} failed: {e:#}"),
+        Err(e) => {
+            eprintln!("✘ transfer from {remote} failed: {e:#}");
+            if cfg!(target_os = "macos") && format!("{e:#}").contains("Application Firewall") {
+                eprintln!("  fix: sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add \"$(which anydrop || echo ./anydrop)\"");
+                eprintln!("       sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp <path-to-anydrop>");
+            }
+        }
     });
 
     tokio::select! {
@@ -357,18 +363,19 @@ async fn resolve_target(
         .await
         .unwrap_or_default();
     if let Some(peer) = pick(&lan, target)? {
+        let mut errors = Vec::new();
         for a in &peer.addrs {
-            if transfer::probe(*a, me, Duration::from_secs(2))
-                .await
-                .is_ok()
-            {
-                return Ok((*a, peer.device.name.clone()));
+            match transfer::probe(*a, me, Duration::from_secs(2)).await {
+                Ok(_) => return Ok((*a, peer.device.name.clone())),
+                Err(e) => errors.push(format!("  {a}: {e:#}")),
             }
         }
         bail!(
-            "{} was found via mDNS but none of its addresses answered: {:?}",
+            "{} was found via mDNS but none of its addresses answered:\n{}\n\
+             hint: if the receiver logs \"closed by the OS immediately after accept\", \
+             allow anydrop in its firewall (macOS: System Settings > Network > Firewall)",
             peer.device.name,
-            peer.addrs
+            errors.join("\n")
         );
     }
 

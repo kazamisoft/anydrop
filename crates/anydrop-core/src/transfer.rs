@@ -92,7 +92,8 @@ async fn connect<A: ToSocketAddrs>(addr: A) -> Result<TcpStream> {
     let s = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
         .map_err(|_| anyhow!("connection timed out"))??;
-    s.set_nodelay(true)?;
+    // Latency optimisation only; never fatal (see handle_connection).
+    let _ = s.set_nodelay(true);
     Ok(s)
 }
 
@@ -304,7 +305,18 @@ pub async fn handle_connection(
     remote: SocketAddr,
     cfg: &ReceiverConfig,
 ) -> Result<ConnOutcome> {
-    stream.set_nodelay(true)?;
+    // macOS returns EINVAL from setsockopt() when the socket was already shut
+    // down by the kernel (e.g. the Application Firewall killed the flow right
+    // after accept). Don't fail here; the first read reports the real cause.
+    if let Err(e) = stream.set_nodelay(true) {
+        if e.raw_os_error() == Some(22) {
+            bail!(
+                "connection was closed by the OS immediately after accept ({e}). \
+                 On macOS this usually means the Application Firewall is blocking \
+                 incoming connections for this binary"
+            );
+        }
+    }
     let (rd, wr) = stream.into_split();
     let mut rd = BufReader::with_capacity(CHUNK, rd);
     let mut wr = BufWriter::new(wr);
