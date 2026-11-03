@@ -36,6 +36,8 @@ use tray::{Tray, TrayAction};
 const TS_RESCAN_EVERY: Duration = Duration::from_secs(60);
 /// Keep a Tailscale peer listed until it has been missing this long.
 const TS_STALE_AFTER: Duration = Duration::from_secs(180);
+/// Shown wherever auto-accept can be switched on.
+const AUTO_ACCEPT_WARNING: &str = "⚠ 같은 네트워크의 누구나 확인 없이 파일을 보낼 수 있습니다.";
 
 fn main() -> eframe::Result {
     // Paths passed on the command line (e.g. "Send with AnyDrop" menu) are pre-selected.
@@ -148,6 +150,8 @@ struct AnyDropApp {
     browser: Option<Browser>,
     last_ts_scan: Option<Instant>,
     show_settings: bool,
+    /// Tray asked to enable auto-accept: show the warning and ask first.
+    confirm_auto_accept: bool,
     tray: Option<Tray>,
     /// Window is hidden in the tray.
     hidden: bool,
@@ -189,6 +193,7 @@ impl AnyDropApp {
             browser: None,
             last_ts_scan: None,
             show_settings: false,
+            confirm_auto_accept: false,
             tray: None,
             hidden: false,
             hide_on_start: false,
@@ -263,7 +268,7 @@ impl AnyDropApp {
             device: self.me.clone(),
             accept: self.accept_fn(),
             progress: Some(self.progress_fn(false)),
-            max_total_size: None,
+            max_total_size: s.max_total_size(),
         });
         let shared = self.shared.clone();
         let ctx = self.ctx.clone();
@@ -629,15 +634,17 @@ impl eframe::App for AnyDropApp {
                 TrayAction::Show => self.show_window(ctx),
                 TrayAction::OpenFolder => open_folder(&self.settings.download_dir),
                 TrayAction::ToggleAutoAccept => {
-                    self.draft = self.settings.clone();
-                    self.draft.auto_accept = !self.settings.auto_accept;
-                    self.settings.auto_accept = self.draft.auto_accept;
-                    self.auto_accept
-                        .store(self.settings.auto_accept, Ordering::Relaxed);
-                    if let Some(t) = &self.tray {
-                        t.set_auto_accept(self.settings.auto_accept);
+                    if self.settings.auto_accept {
+                        self.set_auto_accept(false);
+                    } else {
+                        // Turning it on needs the same warning as the settings dialog.
+                        // The menu check mark already flipped itself: undo until confirmed.
+                        if let Some(t) = &self.tray {
+                            t.set_auto_accept(false);
+                        }
+                        self.confirm_auto_accept = true;
+                        self.show_window(ctx);
                     }
-                    let _ = self.settings.save();
                 }
                 TrayAction::Quit => {
                     self.quitting = true;
@@ -969,6 +976,7 @@ impl eframe::App for AnyDropApp {
 
         self.offer_dialog(&ctx);
         self.settings_dialog(&ctx);
+        self.auto_accept_dialog(&ctx);
     }
 
     fn on_exit(&mut self) {
@@ -1034,6 +1042,49 @@ impl AnyDropApp {
         }
     }
 
+    fn set_auto_accept(&mut self, on: bool) {
+        self.settings.auto_accept = on;
+        self.draft.auto_accept = on;
+        self.auto_accept.store(on, Ordering::Relaxed);
+        if let Some(t) = &self.tray {
+            t.set_auto_accept(on);
+        }
+        if let Err(e) = self.settings.save() {
+            self.shared
+                .lock()
+                .unwrap()
+                .log(false, format!("설정 저장 실패: {e}"), None);
+        }
+    }
+
+    fn auto_accept_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_auto_accept {
+            return;
+        }
+        let mut answer = None;
+        egui::Modal::new(egui::Id::unique("anydrop-auto-accept")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("자동 수락을 켤까요?");
+            ui.colored_label(ui.visuals().warn_fg_color, AUTO_ACCEPT_WARNING);
+            ui.label("신뢰하는 네트워크(집, 사무실, Tailscale)에서만 사용하세요.");
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("켜기").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("취소").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if let Some(on) = answer {
+            self.confirm_auto_accept = false;
+            if on {
+                self.set_auto_accept(true);
+            }
+        }
+    }
+
     fn settings_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
@@ -1079,6 +1130,22 @@ impl AnyDropApp {
                         &mut self.draft.auto_accept,
                         "묻지 않고 자동 수락 (신뢰하는 네트워크에서만)",
                     );
+                    ui.end_row();
+                    if self.draft.auto_accept {
+                        ui.label("");
+                        ui.colored_label(ui.visuals().warn_fg_color, AUTO_ACCEPT_WARNING);
+                        ui.end_row();
+                    }
+
+                    ui.label("최대 수신 크기");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.draft.max_receive_gb)
+                                .range(0..=1_000_000)
+                                .suffix(" GB"),
+                        );
+                        ui.weak("0 = 제한 없음");
+                    });
                     ui.end_row();
 
                     if self.tray.is_some() {
