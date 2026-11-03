@@ -23,6 +23,8 @@ APP=target/AnyDrop.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/AnyDrop"
+# Same code-drawn icon as the window / tray / Windows exe (crates/anydrop-gui/src/icon.rs).
+cargo run -q --release -p anydrop-gui --example make-icns -- "$APP/Contents/Resources/AnyDrop.icns"
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,6 +36,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleIdentifier</key><string>com.kazamisoft.anydrop</string>
   <key>CFBundleExecutable</key><string>AnyDrop</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AnyDrop</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>10.15</string>

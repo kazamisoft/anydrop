@@ -274,6 +274,7 @@ dependencies = [
  "chrono",
  "dirs",
  "eframe",
+ "miniz_oxide 0.8.9",
  "rfd",
  "serde",
  "serde_json",

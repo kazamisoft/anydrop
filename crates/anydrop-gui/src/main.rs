@@ -7,6 +7,8 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod icns;
 mod icon;
 mod settings;
 mod tray;
@@ -42,7 +44,9 @@ fn main() -> eframe::Result {
             .with_min_inner_size([640.0, 420.0])
             .with_drag_and_drop(true)
             .with_icon(Arc::new({
-                let (rgba, width, height) = icon::app_icon_rgba(64);
+                // eframe also uses this as the Dock icon on macOS: give it enough pixels to stay sharp.
+                let (rgba, width, height) =
+                    icon::app_icon_rgba(if cfg!(target_os = "macos") { 512 } else { 64 });
                 egui::IconData {
                     rgba,
                     width,
@@ -1154,6 +1158,25 @@ fn install_fonts(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn icns_container_is_valid() {
+        let icns = super::icns::icns_bytes();
+        assert_eq!(&icns[0..4], b"icns");
+        assert_eq!(
+            u32::from_be_bytes(icns[4..8].try_into().unwrap()) as usize,
+            icns.len()
+        );
+        // Walk the entries: each is OSType + BE length (incl. header) + PNG.
+        let (mut off, mut n) = (8, 0);
+        while off < icns.len() {
+            let len = u32::from_be_bytes(icns[off + 4..off + 8].try_into().unwrap()) as usize;
+            assert_eq!(&icns[off + 8..off + 16], b"\x89PNG\r\n\x1a\n");
+            off += len;
+            n += 1;
+        }
+        assert_eq!((off, n), (icns.len(), 10));
+    }
+
     #[test]
     fn ico_container_is_valid() {
         let sizes = [16, 32, 256];
