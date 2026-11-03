@@ -363,20 +363,15 @@ async fn resolve_target(
         .await
         .unwrap_or_default();
     if let Some(peer) = pick(&lan, target)? {
-        let mut errors = Vec::new();
-        for a in &peer.addrs {
-            match transfer::probe(*a, me, Duration::from_secs(2)).await {
-                Ok(_) => return Ok((*a, peer.device.name.clone())),
-                Err(e) => errors.push(format!("  {a}: {e:#}")),
-            }
-        }
-        bail!(
-            "{} was found via mDNS but none of its addresses answered:\n{}\n\
-             hint: if the receiver logs \"closed by the OS immediately after accept\", \
-             allow anydrop in its firewall (macOS: System Settings > Network > Firewall)",
-            peer.device.name,
-            errors.join("\n")
-        );
+        return match transfer::probe_any(&peer.addrs, me, Duration::from_secs(2)).await {
+            Ok((addr, _)) => Ok((addr, peer.device.name.clone())),
+            Err(e) => bail!(
+                "{} was found via mDNS but none of its addresses answered: {e:#}\n\
+                 hint: if the receiver logs \"closed by the OS immediately after accept\", \
+                 allow anydrop in its firewall (macOS: System Settings > Network > Firewall)",
+                peer.device.name
+            ),
+        };
     }
 
     if let Ok(ts) = tailscale::list_peers().await {

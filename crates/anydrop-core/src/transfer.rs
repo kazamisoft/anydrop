@@ -137,6 +137,42 @@ pub async fn probe<A: ToSocketAddrs>(
     .map_err(|_| anyhow!("probe timed out"))?
 }
 
+/// Probe all `addrs` concurrently and return the first one that answers.
+///
+/// Devices often advertise addresses that are unreachable from the peer
+/// (WSL / Hyper-V / VPN adapters, IPv6 ULA...). Probing them one after another
+/// costs `timeout` each; racing them makes the reachable one win in ~1 RTT.
+pub async fn probe_any(
+    addrs: &[SocketAddr],
+    me: &DeviceInfo,
+    timeout: Duration,
+) -> Result<(SocketAddr, DeviceInfo)> {
+    if addrs.is_empty() {
+        bail!("no addresses to try");
+    }
+    let mut set = tokio::task::JoinSet::new();
+    for (i, a) in addrs.iter().copied().enumerate() {
+        let me = me.clone();
+        set.spawn(async move {
+            // Tiny stagger so that preferred (earlier) addresses win ties.
+            tokio::time::sleep(Duration::from_millis((i as u64 * 25).min(250))).await;
+            (a, probe(a, &me, timeout).await)
+        });
+    }
+    let mut errors = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((a, Ok(dev))) => {
+                set.abort_all();
+                return Ok((a, dev));
+            }
+            Ok((a, Err(e))) => errors.push(format!("{a}: {e:#}")),
+            Err(_) => {}
+        }
+    }
+    bail!("no address answered:\n  {}", errors.join("\n  "))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum SendOutcome {
     Completed { files: usize, bytes: u64 },

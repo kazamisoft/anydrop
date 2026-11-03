@@ -331,3 +331,63 @@ async fn interrupted_transfer_cleans_up_part_file() {
         list_files(dst.path())
     );
 }
+
+#[tokio::test]
+async fn probe_any_skips_unreachable_addresses_quickly() {
+    let dst = tempfile::tempdir().unwrap();
+    let (good, _) = start_receiver(dst.path(), auto_accept()).await;
+    // TEST-NET-1 addresses: never answer (SYN is dropped or unreachable).
+    let dead: Vec<SocketAddr> = (1..=5)
+        .map(|i| format!("192.0.2.{i}:47820").parse().unwrap())
+        .collect();
+    let mut addrs = dead.clone();
+    addrs.push(good); // reachable address listed last, like a Windows box with WSL/Hyper-V adapters
+
+    let t = std::time::Instant::now();
+    let (addr, dev) = probe_any(
+        &addrs,
+        &DeviceInfo::local(None),
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(addr, good);
+    assert_eq!(dev.name, "receiver");
+    // Sequential probing would take ~5 x 2s; racing finishes in well under one timeout.
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(1500),
+        "took {:?}",
+        t.elapsed()
+    );
+}
+
+/// Needs working multicast on the host; run with `cargo test -- --ignored`.
+#[tokio::test]
+#[ignore]
+async fn browser_tracks_peers_appearing_and_leaving() {
+    use anydrop_core::discovery::{Advertiser, Browser};
+    let browser = Browser::start(Arc::new(|| {})).unwrap();
+    let dev = DeviceInfo::local(Some("browse-test".into()));
+
+    let adv = Advertiser::start(&dev, 47999).unwrap();
+    let mut seen = false;
+    for _ in 0..100 {
+        if browser.peers().iter().any(|p| p.device.id == dev.id) {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(seen, "advertised peer never appeared");
+
+    drop(adv); // sends mDNS goodbye
+    let mut gone = false;
+    for _ in 0..100 {
+        if !browser.peers().iter().any(|p| p.device.id == dev.id) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(gone, "peer was not removed after goodbye");
+}

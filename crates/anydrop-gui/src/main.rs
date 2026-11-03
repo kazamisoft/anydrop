@@ -9,7 +9,7 @@
 
 mod settings;
 
-use anydrop_core::discovery::{self, Advertiser};
+use anydrop_core::discovery::{Advertiser, Browser};
 use anydrop_core::transfer::{
     self, collect_files, AcceptFn, ConnOutcome, OfferRequest, Progress, ProgressFn, ReceiverConfig,
     SendOutcome,
@@ -17,7 +17,7 @@ use anydrop_core::transfer::{
 use anydrop_core::{tailscale, DeviceInfo, Peer, PeerSource};
 use eframe::egui;
 use settings::Settings;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +25,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
-const RESCAN_EVERY: Duration = Duration::from_secs(15);
+/// LAN peers come from a long-lived mDNS listener (no polling). Tailscale has no
+/// multicast, so its peers are probed quietly at this interval.
+const TS_RESCAN_EVERY: Duration = Duration::from_secs(60);
+/// Keep a Tailscale peer listed until it has been missing this long.
+const TS_STALE_AFTER: Duration = Duration::from_secs(180);
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -59,8 +63,8 @@ struct LogLine {
 
 #[derive(Default)]
 struct Shared {
-    peers: Vec<Peer>,
-    scanning: bool,
+    ts_peers: HashMap<String, (Peer, Instant)>,
+    ts_scanning: bool,
     offers: VecDeque<PendingOffer>,
     sending: Option<(String, Option<Progress>)>,
     clear_files: bool,
@@ -106,7 +110,8 @@ struct AnyDropApp {
     selected: Option<String>, // peer device id
     manual_addr: String,
     manual_peers: Vec<Peer>,
-    last_scan: Option<Instant>,
+    browser: Option<Browser>,
+    last_ts_scan: Option<Instant>,
     show_settings: bool,
 }
 
@@ -136,10 +141,12 @@ impl AnyDropApp {
             selected: None,
             manual_addr: String::new(),
             manual_peers: Vec::new(),
-            last_scan: None,
+            browser: None,
+            last_ts_scan: None,
             show_settings: false,
         };
         app.start_receiver();
+        app.start_browser();
         app
     }
 
@@ -277,37 +284,63 @@ impl AnyDropApp {
 
     // ---------------------------------------------------------------- discovery
 
-    fn scan(&mut self) {
+    fn start_browser(&mut self) {
+        let ctx = self.ctx.clone();
+        let _g = self.rt.enter();
+        match Browser::start(Arc::new(move || ctx.request_repaint())) {
+            Ok(b) => self.browser = Some(b),
+            Err(e) => {
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .log(false, format!("mDNS 검색 시작 실패: {e}"), None)
+            }
+        }
+    }
+
+    /// Quiet background Tailscale probe; never clears the list while running.
+    fn ts_scan(&mut self) {
         {
             let mut sh = self.shared.lock().unwrap();
-            if sh.scanning {
+            if sh.ts_scanning {
                 return;
             }
-            sh.scanning = true;
+            sh.ts_scanning = true;
         }
-        self.last_scan = Some(Instant::now());
+        self.last_ts_scan = Some(Instant::now());
         let shared = self.shared.clone();
         let ctx = self.ctx.clone();
         let me = self.me.clone();
         let port = self.settings.port;
         self.rt.spawn(async move {
-            let lan = discovery::browse(Duration::from_secs(2), Some(me.id.clone()));
-            let ts = tailscale::discover(&me, port, Duration::from_millis(1500));
-            let (lan, ts) = tokio::join!(lan, ts);
-            let mut all = lan.unwrap_or_default();
-            for p in ts.unwrap_or_default() {
-                if let Some(e) = all.iter_mut().find(|e| e.device.id == p.device.id) {
-                    e.addrs.extend(p.addrs);
-                } else {
-                    all.push(p);
-                }
-            }
-            all.retain(|p| p.device.id != me.id);
+            let found = tailscale::discover(&me, port, Duration::from_millis(1500))
+                .await
+                .unwrap_or_default();
             let mut sh = shared.lock().unwrap();
-            sh.peers = all;
-            sh.scanning = false;
-            ctx.request_repaint();
+            sh.ts_scanning = false;
+            let before: Vec<String> = sh.ts_peers.keys().cloned().collect();
+            let now = Instant::now();
+            for p in found {
+                sh.ts_peers.insert(p.device.id.clone(), (p, now));
+            }
+            sh.ts_peers
+                .retain(|_, (_, seen)| now.duration_since(*seen) < TS_STALE_AFTER);
+            let mut after: Vec<String> = sh.ts_peers.keys().cloned().collect();
+            let mut before = before;
+            before.sort();
+            after.sort();
+            if before != after {
+                ctx.request_repaint();
+            }
         });
+    }
+
+    fn refresh(&mut self) {
+        if let Some(b) = &self.browser {
+            let _g = self.rt.enter();
+            let _ = b.refresh();
+        }
+        self.ts_scan();
     }
 
     fn add_manual(&mut self) {
@@ -357,13 +390,36 @@ impl AnyDropApp {
         }
     }
 
+    /// LAN (mDNS) + Tailscale + manually added peers, merged by device id, sorted by name.
     fn all_peers(&self) -> Vec<Peer> {
-        let mut v = self.shared.lock().unwrap().peers.clone();
-        for m in &self.manual_peers {
-            if !v.iter().any(|p| p.device.id == m.device.id) {
-                v.push(m.clone());
+        let mut v = self.browser.as_ref().map(|b| b.peers()).unwrap_or_default();
+        let ts: Vec<Peer> = self
+            .shared
+            .lock()
+            .unwrap()
+            .ts_peers
+            .values()
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in ts.into_iter().chain(self.manual_peers.iter().cloned()) {
+            if let Some(e) = v.iter_mut().find(|e| e.device.id == p.device.id) {
+                for a in p.addrs {
+                    if !e.addrs.contains(&a) {
+                        e.addrs.push(a);
+                    }
+                }
+            } else {
+                v.push(p);
             }
         }
+        v.retain(|p| p.device.id != self.me.id);
+        v.sort_by(|a, b| {
+            a.device
+                .name
+                .to_lowercase()
+                .cmp(&b.device.name.to_lowercase())
+                .then(a.device.id.cmp(&b.device.id))
+        });
         v
     }
 
@@ -379,20 +435,9 @@ impl AnyDropApp {
         self.rt.spawn(async move {
             let res: anyhow::Result<SendOutcome> = async {
                 let list = tokio::task::spawn_blocking(move || collect_files(&files)).await??;
-                let mut errors = Vec::new();
-                let mut target = None;
-                for a in &peer.addrs {
-                    match transfer::probe(*a, &me, Duration::from_secs(2)).await {
-                        Ok(_) => {
-                            target = Some(*a);
-                            break;
-                        }
-                        Err(e) => errors.push(format!("{a}: {e:#}")),
-                    }
-                }
-                let addr = target.ok_or_else(|| {
-                    anyhow::anyhow!("응답하는 주소가 없음 — {}", errors.join(" / "))
-                })?;
+                let (addr, _) = transfer::probe_any(&peer.addrs, &me, Duration::from_secs(3))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("응답하는 주소가 없음 — {e:#}"))?;
                 transfer::send_files(addr, &me, &list, Some(progress)).await
             }
             .await;
@@ -450,8 +495,11 @@ impl eframe::App for AnyDropApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        if self.last_scan.is_none_or(|t| t.elapsed() > RESCAN_EVERY) {
-            self.scan();
+        if self
+            .last_ts_scan
+            .is_none_or(|t| t.elapsed() > TS_RESCAN_EVERY)
+        {
+            self.ts_scan();
         }
         ctx.request_repaint_after(Duration::from_secs(1));
 
@@ -476,10 +524,9 @@ impl eframe::App for AnyDropApp {
             self.files.clear();
         }
         let peers = self.all_peers();
-        let (scanning, status, sending, receiving) = {
+        let (status, sending, receiving) = {
             let sh = self.shared.lock().unwrap();
             (
-                sh.scanning,
                 sh.receiver_status.clone(),
                 sh.sending.clone(),
                 sh.receiving.clone(),
@@ -551,10 +598,12 @@ impl eframe::App for AnyDropApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong("주변 기기");
-                    if scanning {
-                        ui.spinner();
-                    } else if ui.small_button("🔄 새로고침").clicked() {
-                        self.scan();
+                    if ui
+                        .small_button("🔄")
+                        .on_hover_text("지금 다시 찾기 (평소에는 자동으로 갱신됩니다)")
+                        .clicked()
+                    {
+                        self.refresh();
                     }
                 });
                 ui.separator();
@@ -562,11 +611,7 @@ impl eframe::App for AnyDropApp {
                     .max_height(ui.available_height() - 70.0)
                     .show(ui, |ui| {
                         if peers.is_empty() {
-                            ui.weak(if scanning {
-                                "찾는 중..."
-                            } else {
-                                "발견된 기기가 없습니다.\n상대 기기에서 AnyDrop을 실행하세요."
-                            });
+                            ui.weak("기기를 찾는 중...\n상대 기기에서 AnyDrop을 실행하세요.");
                         }
                         for p in &peers {
                             let sel = self.selected.as_deref() == Some(p.device.id.as_str());

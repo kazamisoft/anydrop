@@ -11,6 +11,7 @@ use anyhow::Result;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Keeps the service registered while alive.
@@ -78,39 +79,11 @@ pub fn browse_blocking(timeout: Duration, self_id: Option<&str>) -> Result<Vec<P
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
         match rx.recv_timeout(left) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                let id = info
-                    .get_property_val_str("id")
-                    .unwrap_or_default()
-                    .to_string();
-                if id.is_empty() || Some(id.as_str()) == self_id {
-                    continue;
+                if let Some(p) = peer_from(&info) {
+                    if Some(p.device.id.as_str()) != self_id {
+                        found.insert(p.device.id.clone(), p);
+                    }
                 }
-                let port = info.get_port();
-                // Prefer IPv4, then IPv6; skip link-local v6 (needs scope id).
-                let mut addrs: Vec<SocketAddr> = info
-                    .get_addresses()
-                    .iter()
-                    .map(|ip| ip.to_ip_addr())
-                    .filter(|ip| match ip {
-                        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
-                        _ => true,
-                    })
-                    .map(|ip| SocketAddr::new(ip, port))
-                    .collect();
-                addrs.sort_by_key(|a| (a.is_ipv6(), a.ip().is_loopback()));
-                let device = DeviceInfo {
-                    id: id.clone(),
-                    name: info.get_property_val_str("name").unwrap_or("?").to_string(),
-                    os: info.get_property_val_str("os").unwrap_or("?").to_string(),
-                };
-                found.insert(
-                    id,
-                    Peer {
-                        device,
-                        addrs,
-                        source: PeerSource::Lan,
-                    },
-                );
             }
             Ok(_) => {}
             Err(_) => break,
@@ -123,6 +96,129 @@ pub fn browse_blocking(timeout: Duration, self_id: Option<&str>) -> Result<Vec<P
     Ok(v)
 }
 
+fn peer_from(info: &mdns_sd::ResolvedService) -> Option<Peer> {
+    let id = info
+        .get_property_val_str("id")
+        .unwrap_or_default()
+        .to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let port = info.get_port();
+    // Prefer IPv4, then IPv6; skip link-local v6 (needs scope id).
+    let mut addrs: Vec<SocketAddr> = info
+        .get_addresses()
+        .iter()
+        .map(|ip| ip.to_ip_addr())
+        .filter(|ip| match ip {
+            std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+            _ => true,
+        })
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect();
+    addrs.sort_by_key(|a| (a.is_ipv6(), a.ip().is_loopback(), *a));
+    addrs.dedup();
+    let device = DeviceInfo {
+        id,
+        name: info.get_property_val_str("name").unwrap_or("?").to_string(),
+        os: info.get_property_val_str("os").unwrap_or("?").to_string(),
+    };
+    Some(Peer {
+        device,
+        addrs,
+        source: PeerSource::Lan,
+    })
+}
+
 pub async fn browse(timeout: Duration, self_id: Option<String>) -> Result<Vec<Peer>> {
     tokio::task::spawn_blocking(move || browse_blocking(timeout, self_id.as_deref())).await?
+}
+
+/// Long-lived LAN browser: one mDNS daemon that keeps listening and updates the
+/// peer set only when devices appear (announce) or disappear (goodbye / TTL
+/// expiry). Use this in long-running apps instead of polling [`browse`].
+pub struct Browser {
+    daemon: ServiceDaemon,
+    peers: Arc<Mutex<HashMap<String, Peer>>>,
+    on_change: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Browser {
+    pub fn start(on_change: Arc<dyn Fn() + Send + Sync>) -> Result<Self> {
+        let b = Self {
+            daemon: ServiceDaemon::new()?,
+            peers: Arc::default(),
+            on_change,
+        };
+        b.spawn_listener()?;
+        Ok(b)
+    }
+
+    fn spawn_listener(&self) -> Result<()> {
+        let rx = self.daemon.browse(SERVICE_TYPE)?;
+        let peers = self.peers.clone();
+        let on_change = self.on_change.clone();
+        std::thread::Builder::new()
+            .name("anydrop-mdns".into())
+            .spawn(move || {
+                while let Ok(ev) = rx.recv() {
+                    let changed = match ev {
+                        ServiceEvent::ServiceResolved(info) => match peer_from(&info) {
+                            Some(p) => {
+                                let mut m = peers.lock().unwrap();
+                                let key = info.get_fullname().to_string();
+                                let same = m.get(&key).is_some_and(|old| {
+                                    old.device == p.device && old.addrs == p.addrs
+                                });
+                                m.insert(key, p);
+                                !same
+                            }
+                            None => false,
+                        },
+                        ServiceEvent::ServiceRemoved(_, fullname) => {
+                            peers.lock().unwrap().remove(&fullname).is_some()
+                        }
+                        ServiceEvent::SearchStopped(_) => break,
+                        _ => false,
+                    };
+                    if changed {
+                        on_change();
+                    }
+                }
+            })?;
+        Ok(())
+    }
+
+    /// Re-send mDNS queries now (e.g. user pressed "refresh"). Known peers are kept.
+    pub fn refresh(&self) -> Result<()> {
+        let _ = self.daemon.stop_browse(SERVICE_TYPE);
+        self.spawn_listener()
+    }
+
+    /// Current peers, de-duplicated by device id, sorted by name.
+    pub fn peers(&self) -> Vec<Peer> {
+        let m = self.peers.lock().unwrap();
+        let mut by_id: HashMap<String, Peer> = HashMap::new();
+        for p in m.values() {
+            by_id
+                .entry(p.device.id.clone())
+                .or_insert_with(|| p.clone());
+        }
+        let mut v: Vec<Peer> = by_id.into_values().collect();
+        v.sort_by(|a, b| {
+            a.device
+                .name
+                .to_lowercase()
+                .cmp(&b.device.name.to_lowercase())
+                .then(a.device.id.cmp(&b.device.id))
+        });
+        v
+    }
+}
+
+impl Drop for Browser {
+    fn drop(&mut self) {
+        let _ = self.daemon.stop_browse(SERVICE_TYPE);
+        let _ = self.daemon.shutdown();
+    }
 }
