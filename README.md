@@ -9,6 +9,29 @@ anydrop list                    # 주변 기기 찾기 (LAN + Tailscale)
 anydrop send MacBook a.pdf dir/ # 보내는 쪽: 이름/IP/Tailscale 호스트명으로 전송
 ```
 
+## GUI (권장)
+
+```bash
+cargo build --release            # CLI(anydrop) + GUI(anydrop-gui) 함께 빌드
+```
+
+| OS | 실행 |
+|---|---|
+| Windows | `target\release\anydrop-gui.exe` 더블클릭 (콘솔 창 없음) |
+| macOS | `./scripts/macos-app.sh` → `target/AnyDrop.app` 생성(ad-hoc 서명, 로컬 네트워크 권한 문구 포함) → `cp -R target/AnyDrop.app /Applications/` |
+
+- 실행하면 바로 **수신 대기** + 주변 기기 자동 검색(LAN mDNS + Tailscale, 15초마다)
+- 파일/폴더를 창에 **끌어다 놓고** → 왼쪽에서 기기 선택 → **보내기**
+- 받는 쪽에는 **받기 요청 창**(수락/거절)이 뜸. 설정에서 자동 수락, 저장 폴더, 기기 이름, 포트 변경
+- 목록에 없는 기기는 왼쪽 아래에 IP/호스트 이름 입력 후 **추가**
+- `anydrop-gui 파일1 폴더2` 처럼 실행 인자로 넘기면 보낼 목록에 미리 들어감
+- 설정 파일: Windows `%APPDATA%\AnyDrop\settings.json`, macOS `~/Library/Application Support/AnyDrop/settings.json`
+
+> macOS에서 직접 빌드한 바이너리를 그대로 실행하면 방화벽이 들어오는 연결을 끊을 수 있습니다
+> (수신 로그에 `Invalid argument (os error 22)` / "closed by the OS immediately after accept").
+> `.app`으로 만들어 실행하고 방화벽 허용을 누르거나, 아래 명령으로 허용하세요.
+> `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /Applications/AnyDrop.app && sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /Applications/AnyDrop.app`
+
 ## 구조
 
 ```
@@ -20,7 +43,9 @@ anydrop/
 │  ├─ src/tailscale.rs      # `tailscale status --json` → 피어 목록 → 포트 probe
 │  ├─ src/paths.rs          # 경로 보안 + 크로스플랫폼 파일명(NFC 한글, Windows 금지문자)
 │  └─ tests/transfer.rs     # E2E 시뮬레이션 테스트
-└─ crates/anydrop-cli/      # `anydrop` 명령행 프로그램
+├─ crates/anydrop-cli/      # `anydrop` 명령행 프로그램
+├─ crates/anydrop-gui/      # `anydrop-gui` 데스크톱 앱 (egui)
+└─ scripts/macos-app.sh     # AnyDrop.app 번들 생성 + ad-hoc 서명
 ```
 
 ### 프로토콜 (v1, TCP 47820)
@@ -158,7 +183,8 @@ anydrop send PC-B ./somefile      # PC-B 터미널에서 y/N 입력
 ## 로드맵
 
 - [ ] TLS(자체 서명 + 지문 확인/페어링 PIN) 암호화
-- [ ] GUI (egui 또는 Tauri), 트레이 상주, Windows 탐색기/Finder "보내기" 메뉴
+- [x] GUI (egui)
+- [ ] 트레이 상주, Windows 탐색기/Finder "보내기" 메뉴
 - [ ] 이어받기(resume), 클립보드/텍스트 전송
 - [ ] 코드 서명(Windows Authenticode, macOS notarization), 설치 패키지(MSI/DMG)
 
