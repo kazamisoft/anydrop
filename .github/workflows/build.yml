@@ -1,0 +1,56 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, bin: anydrop.exe, artifact: anydrop-windows-x64.exe }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, bin: anydrop.exe, artifact: anydrop-windows-arm64.exe, cross: true }
+          - { os: macos-latest, target: aarch64-apple-darwin, bin: anydrop, artifact: anydrop-macos-arm64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, bin: anydrop, artifact: anydrop-macos-x64, cross: true }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, bin: anydrop, artifact: anydrop-linux-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (native targets only)
+        if: ${{ !matrix.cross }}
+        run: cargo test --all --target ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Rename artifact
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  macos-universal:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: lipo
+        run: |
+          lipo -create -output anydrop-macos-universal \
+            anydrop-macos-arm64/anydrop-macos-arm64 anydrop-macos-x64/anydrop-macos-x64
+          chmod +x anydrop-macos-universal
+          lipo -info anydrop-macos-universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anydrop-macos-universal
+          path: anydrop-macos-universal
