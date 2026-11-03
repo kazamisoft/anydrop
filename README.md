@@ -37,6 +37,8 @@ cargo build --release            # CLI(anydrop) + GUI(anydrop-gui) 함께 빌드
 - 실행하면 바로 **수신 대기** + 주변 기기 자동 검색(LAN mDNS + Tailscale, 15초마다)
 - 파일/폴더를 창에 **끌어다 놓고** → 왼쪽에서 기기 선택 → **보내기**
 - 받는 쪽에는 **받기 요청 창**(수락/거절)이 뜸. 설정에서 자동 수락, 저장 폴더, 기기 이름, 포트 변경
+- **최대 수신 크기**(기본 20GB, 0 = 제한 없음)를 넘거나 디스크 여유(전체 크기 + 100MB)가 부족한 요청은 묻지 않고 거절
+- 자동 수락을 켤 때는 경고가 표시됨 (트레이 메뉴에서 켤 때는 확인 창)
 - 목록에 없는 기기는 왼쪽 아래에 IP/호스트 이름 입력 후 **추가**
 - `anydrop-gui 파일1 폴더2` 처럼 실행 인자로 넘기면 보낼 목록에 미리 들어감
 - **트레이 상주** (Windows/macOS): 창의 닫기(X)를 누르면 트레이로 숨고 계속 받습니다.
@@ -156,7 +158,8 @@ git push origin v0.1.1
 ```bash
 # 받는 쪽 (기본 저장 위치: ~/Downloads/AnyDrop, 매번 수락 여부 질문)
 anydrop receive
-anydrop receive -d D:\Inbox -y          # 자동 수락
+anydrop receive -d D:\Inbox -y          # 자동 수락 (시작할 때 경고 출력)
+anydrop receive --max-size 20G          # 20GB 넘는 요청은 거절 (기본: 제한 없음, 단위 K/M/G/T)
 anydrop -n "회의실PC" receive            # 표시 이름 지정
 
 # 보내는 쪽
@@ -206,10 +209,15 @@ anydrop send PC-B ./somefile      # PC-B 터미널에서 y/N 입력
 2. 한쪽 `anydrop receive`, 다른 쪽 `anydrop list` → `tailscale` 출처로 표시됨
 3. `anydrop send <tailscale 호스트명> 파일` 또는 `anydrop send 100.x.y.z 파일`
 
-## 보안 참고 (v0.1)
+## 보안 참고
 
-- 데이터는 SHA-256으로 무결성 검증하지만 **LAN 구간은 암호화하지 않습니다.** 신뢰할 수 있는 네트워크에서만 쓰거나 Tailscale(WireGuard 암호화)을 이용하세요.
-- 수신 측은 기본적으로 매 전송마다 수락을 묻습니다. `-y`는 신뢰 네트워크에서만 사용하세요.
+자세한 위협 모델과 신고 방법은 [SECURITY.md](SECURITY.md)를 보세요. 요약:
+
+- 파일마다 SHA-256으로 무결성을 검증하지만 **LAN 구간은 암호화하지 않고(평문 TCP) 피어 인증도 없습니다.**
+  신뢰할 수 있는 네트워크에서만 쓰거나 Tailscale(WireGuard 암호화)을 이용하세요. 공용 Wi-Fi에서는 쓰지 마세요.
+- 수신기는 **`0.0.0.0`(모든 네트워크 인터페이스)의 TCP 47820**에서 받습니다. Tailscale로도 받기 위한 의도된 동작이며,
+  "로컬 네트워크만 허용" 옵션은 아직 없습니다. 공유기에서 이 포트를 포트 포워딩하지 마세요.
+- 수신 측은 기본적으로 매 전송마다 수락을 묻습니다. 자동 수락(GUI 설정, CLI `-y`)은 신뢰 네트워크에서만 사용하세요.
 
 ## 로드맵
 
