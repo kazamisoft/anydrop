@@ -44,6 +44,9 @@ enum Cmd {
         /// Do not advertise via mDNS (direct IP / Tailscale only)
         #[arg(long)]
         no_mdns: bool,
+        /// Reject offers larger than this, e.g. 500M, 20G, 1T (default: no limit)
+        #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+        max_size: Option<u64>,
     },
     /// Discover receivers on the LAN and the Tailscale network
     List {
@@ -92,7 +95,8 @@ async fn run(cli: Cli) -> Result<()> {
             port,
             yes,
             no_mdns,
-        } => receive(me, dir, port, yes, no_mdns).await,
+            max_size,
+        } => receive(me, dir, port, yes, no_mdns, max_size).await,
         Cmd::List {
             timeout,
             port,
@@ -143,6 +147,7 @@ async fn receive(
     port: u16,
     yes: bool,
     no_mdns: bool,
+    max_size: Option<u64>,
 ) -> Result<()> {
     let dir = match dir {
         Some(d) => d,
@@ -176,6 +181,12 @@ async fn receive(
             "ask before accepting"
         }
     );
+    if let Some(m) = max_size {
+        println!("  max size  : {}", human(m));
+    }
+    if yes {
+        println!("  WARNING   : anyone on this network can send you files without confirmation.");
+    }
     println!("Press Ctrl+C to stop.\n");
 
     let accept: AcceptFn = if yes { auto_accept() } else { prompt_accept() };
@@ -184,7 +195,7 @@ async fn receive(
         device: me,
         accept,
         progress: Some(receive_progress()),
-        max_total_size: None,
+        max_total_size: max_size,
     });
 
     let on_result = Arc::new(|remote: SocketAddr, r: Result<ConnOutcome>| match r {
@@ -466,5 +477,53 @@ fn human(b: u64) -> String {
         format!("{b} B")
     } else {
         format!("{v:.1} {}", U[i])
+    }
+}
+
+/// Parse a byte size such as `1048576`, `500M`, `20G`, `1.5T` (binary units).
+fn parse_size(s: &str) -> std::result::Result<u64, String> {
+    let t = s.trim();
+    let (num, mult) = match t.char_indices().find(|(_, c)| c.is_ascii_alphabetic()) {
+        Some((i, _)) => {
+            let unit = t[i..].to_ascii_uppercase();
+            let mult: u64 = match unit.trim_end_matches(['B', 'I']) {
+                "" => 1,
+                "K" => 1 << 10,
+                "M" => 1 << 20,
+                "G" => 1 << 30,
+                "T" => 1 << 40,
+                _ => return Err(format!("unknown unit in {s:?} (use K, M, G or T)")),
+            };
+            (t[..i].trim(), mult)
+        }
+        None => (t, 1),
+    };
+    let n: f64 = num.parse().map_err(|_| format!("invalid size {s:?}"))?;
+    if !n.is_finite() || n <= 0.0 {
+        return Err(format!("size must be positive: {s:?}"));
+    }
+    let bytes = n * mult as f64;
+    if bytes >= u64::MAX as f64 {
+        return Err(format!("size too large: {s:?}"));
+    }
+    Ok(bytes as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_size;
+
+    #[test]
+    fn parses_sizes() {
+        assert_eq!(parse_size("1048576"), Ok(1 << 20));
+        assert_eq!(parse_size("500M"), Ok(500 << 20));
+        assert_eq!(parse_size("20G"), Ok(20 << 30));
+        assert_eq!(parse_size("20gb"), Ok(20 << 30));
+        assert_eq!(parse_size("1.5T"), Ok(3 << 39));
+        assert_eq!(parse_size("2 GiB"), Ok(2 << 30));
+        assert!(parse_size("0").is_err());
+        assert!(parse_size("-1G").is_err());
+        assert!(parse_size("10X").is_err());
+        assert!(parse_size("abc").is_err());
     }
 }
