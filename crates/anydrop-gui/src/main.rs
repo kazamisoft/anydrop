@@ -623,10 +623,18 @@ impl eframe::App for AnyDropApp {
                             };
                             let text =
                                 format!("{icon} {}\n    {} · {src}", p.device.name, p.device.os);
-                            let r = ui.add_sized(
-                                [ui.available_width(), 40.0],
-                                egui::Button::selectable(sel, text),
-                            );
+                            // Full-width row, text left-aligned.
+                            let r = ui
+                                .with_layout(
+                                    egui::Layout::top_down_justified(egui::Align::LEFT),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Button::selectable(sel, text)
+                                                .min_size(egui::vec2(0.0, 40.0)),
+                                        )
+                                    },
+                                )
+                                .inner;
                             let r = r.on_hover_text(
                                 p.addrs
                                     .iter()

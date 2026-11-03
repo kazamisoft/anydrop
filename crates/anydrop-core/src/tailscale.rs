@@ -58,11 +58,14 @@ pub fn parse_status(json: &[u8]) -> Result<Vec<TsPeer>> {
 pub async fn list_peers() -> Result<Vec<TsPeer>> {
     let mut last_err = anyhow!("tailscale CLI not found");
     for bin in candidate_binaries() {
-        match tokio::process::Command::new(&bin)
-            .args(["status", "--json"])
-            .output()
-            .await
-        {
+        let mut cmd = tokio::process::Command::new(&bin);
+        cmd.args(["status", "--json"])
+            .stdin(std::process::Stdio::null());
+        // A GUI (windows-subsystem) process spawning a console program makes Windows
+        // flash a black console window. CREATE_NO_WINDOW suppresses it.
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        match cmd.output().await {
             Ok(out) if out.status.success() => return parse_status(&out.stdout),
             Ok(out) => last_err = anyhow!("{bin}: {}", String::from_utf8_lossy(&out.stderr).trim()),
             Err(e) => last_err = anyhow!("{bin}: {e}"),
