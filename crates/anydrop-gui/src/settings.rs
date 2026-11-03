@@ -12,6 +12,10 @@ pub struct Settings {
     pub download_dir: PathBuf,
     pub port: u16,
     pub auto_accept: bool,
+    /// Close button hides the window to the tray instead of quitting.
+    pub minimize_to_tray: bool,
+    /// Start hidden in the tray (e.g. when launched at login).
+    pub start_hidden: bool,
 }
 
 impl Default for Settings {
@@ -26,6 +30,8 @@ impl Default for Settings {
             download_dir,
             port: DEFAULT_PORT,
             auto_accept: false,
+            minimize_to_tray: true,
+            start_hidden: false,
         }
     }
 }

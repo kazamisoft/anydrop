@@ -25,6 +25,10 @@ cargo build --release            # CLI(anydrop) + GUI(anydrop-gui) 함께 빌드
 - 받는 쪽에는 **받기 요청 창**(수락/거절)이 뜸. 설정에서 자동 수락, 저장 폴더, 기기 이름, 포트 변경
 - 목록에 없는 기기는 왼쪽 아래에 IP/호스트 이름 입력 후 **추가**
 - `anydrop-gui 파일1 폴더2` 처럼 실행 인자로 넘기면 보낼 목록에 미리 들어감
+- **트레이 상주** (Windows/macOS): 창의 닫기(X)를 누르면 트레이로 숨고 계속 받습니다.
+  트레이 메뉴: 열기 · 받은 폴더 열기 · 자동 수락 · 종료 (Windows는 아이콘 왼쪽 클릭으로도 열림).
+  숨겨진 상태에서 받기 요청이 오면 창이 자동으로 앞에 뜹니다.
+  설정 → "시작할 때 트레이로 숨긴 채 실행" 또는 `anydrop-gui --hidden`
 - 설정 파일: Windows `%APPDATA%\AnyDrop\settings.json`, macOS `~/Library/Application Support/AnyDrop/settings.json`
 
 > macOS에서 직접 빌드한 바이너리를 그대로 실행하면 방화벽이 들어오는 연결을 끊을 수 있습니다
@@ -184,7 +188,8 @@ anydrop send PC-B ./somefile      # PC-B 터미널에서 y/N 입력
 
 - [ ] TLS(자체 서명 + 지문 확인/페어링 PIN) 암호화
 - [x] GUI (egui)
-- [ ] 트레이 상주, Windows 탐색기/Finder "보내기" 메뉴
+- [x] 트레이 상주
+- [ ] 로그인 시 자동 시작, Windows 탐색기/Finder "보내기" 메뉴
 - [ ] 이어받기(resume), 클립보드/텍스트 전송
 - [ ] 코드 서명(Windows Authenticode, macOS notarization), 설치 패키지(MSI/DMG)
 

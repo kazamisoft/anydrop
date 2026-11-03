@@ -8,6 +8,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod settings;
+mod tray;
 
 use anydrop_core::discovery::{Advertiser, Browser};
 use anydrop_core::transfer::{
@@ -24,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
+use tray::{Tray, TrayAction};
 
 /// LAN peers come from a long-lived mDNS listener (no polling). Tailscale has no
 /// multicast, so its peers are probed quietly at this interval.
@@ -37,7 +39,15 @@ fn main() -> eframe::Result {
             .with_title("AnyDrop")
             .with_inner_size([860.0, 600.0])
             .with_min_inner_size([640.0, 420.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(Arc::new({
+                let (rgba, width, height) = app_icon_rgba(64);
+                egui::IconData {
+                    rgba,
+                    width,
+                    height,
+                }
+            })),
         ..Default::default()
     };
     eframe::run_native(
@@ -113,6 +123,14 @@ struct AnyDropApp {
     browser: Option<Browser>,
     last_ts_scan: Option<Instant>,
     show_settings: bool,
+    tray: Option<Tray>,
+    /// Window is hidden in the tray.
+    hidden: bool,
+    /// Hide on the first frame (`--hidden` or "start in tray").
+    hide_on_start: bool,
+    /// Tray "Quit" was chosen: let the close request through.
+    quitting: bool,
+    tooltip: String,
 }
 
 impl AnyDropApp {
@@ -135,6 +153,7 @@ impl AnyDropApp {
             // Paths passed on the command line (e.g. "Send with AnyDrop" menu) are pre-selected.
             files: std::env::args_os()
                 .skip(1)
+                .filter(|a| !a.to_string_lossy().starts_with("--"))
                 .map(PathBuf::from)
                 .filter(|p| p.exists())
                 .collect(),
@@ -144,7 +163,15 @@ impl AnyDropApp {
             browser: None,
             last_ts_scan: None,
             show_settings: false,
+            tray: None,
+            hidden: false,
+            hide_on_start: false,
+            quitting: false,
+            tooltip: String::new(),
         };
+        app.tray = Tray::new(&cc.egui_ctx, app.settings.auto_accept);
+        app.hide_on_start = app.tray.is_some()
+            && (app.settings.start_hidden || std::env::args().any(|a| a == "--hidden"));
         app.start_receiver();
         app.start_browser();
         app
@@ -170,7 +197,10 @@ impl AnyDropApp {
             Ok(l) => l,
             Err(e) => {
                 let mut sh = self.shared.lock().unwrap();
-                let msg = format!("수신 불가: 포트 {} 사용 중? ({e})", s.port);
+                let msg = format!(
+                    "수신 불가: 포트 {} 사용 중 — AnyDrop이 이미 실행 중인지(트레이) 확인하세요 ({e})",
+                    s.port
+                );
                 sh.receiver_status = msg.clone();
                 sh.log(false, msg, None);
                 return;
@@ -476,6 +506,9 @@ impl AnyDropApp {
         self.settings = self.draft.clone();
         self.auto_accept
             .store(self.settings.auto_accept, Ordering::Relaxed);
+        if let Some(t) = &self.tray {
+            t.set_auto_accept(self.settings.auto_accept);
+        }
         if let Err(e) = self.settings.save() {
             self.shared
                 .lock()
@@ -487,13 +520,99 @@ impl AnyDropApp {
         }
         self.start_receiver();
     }
+
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn hide_window(&mut self, ctx: &egui::Context) {
+        self.hidden = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    fn update_tooltip(&mut self) {
+        let Some(t) = &self.tray else { return };
+        let text = {
+            let sh = self.shared.lock().unwrap();
+            let mut text = format!("AnyDrop — {}", self.settings.name);
+            if let Some((to, _)) = &sh.sending {
+                text.push_str(&format!("\n보내는 중 → {to}"));
+            } else if sh.receiving.is_some() {
+                text.push_str("\n받는 중...");
+            } else if let Some(l) = sh.log.last() {
+                text.push_str(&format!(
+                    "\n{} {}",
+                    if l.ok { "✔" } else { "✘" },
+                    l.text.chars().take(60).collect::<String>()
+                ));
+            }
+            text
+        };
+        if text != self.tooltip {
+            t.set_tooltip(&text);
+            self.tooltip = text;
+        }
+    }
 }
 
 // ----------------------------------------------------------------------- UI
 
 impl eframe::App for AnyDropApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    /// Runs every frame *and* while the window is hidden in the tray.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if std::mem::take(&mut self.hide_on_start) {
+            self.hide_window(ctx);
+        }
+
+        let actions = self
+            .tray
+            .as_ref()
+            .map(|t| t.take_actions())
+            .unwrap_or_default();
+        for a in actions {
+            match a {
+                TrayAction::Show => self.show_window(ctx),
+                TrayAction::OpenFolder => open_folder(&self.settings.download_dir),
+                TrayAction::ToggleAutoAccept => {
+                    self.draft = self.settings.clone();
+                    self.draft.auto_accept = !self.settings.auto_accept;
+                    self.settings.auto_accept = self.draft.auto_accept;
+                    self.auto_accept
+                        .store(self.settings.auto_accept, Ordering::Relaxed);
+                    if let Some(t) = &self.tray {
+                        t.set_auto_accept(self.settings.auto_accept);
+                    }
+                    let _ = self.settings.save();
+                }
+                TrayAction::Quit => {
+                    self.quitting = true;
+                    // A hidden window must be visible for the close to be processed on some platforms.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+
+        // Close button -> hide to tray (keep receiving in the background).
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.quitting
+            && self.tray.is_some()
+            && self.settings.minimize_to_tray
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.hide_window(ctx);
+        }
+
+        // An incoming offer needs the user: bring the window back.
+        if self.hidden && !self.shared.lock().unwrap().offers.is_empty() {
+            self.show_window(ctx);
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
 
         if self
             .last_ts_scan
@@ -501,6 +620,15 @@ impl eframe::App for AnyDropApp {
         {
             self.ts_scan();
         }
+        // Wake up for the next Tailscale scan even when hidden.
+        ctx.request_repaint_after(TS_RESCAN_EVERY);
+
+        self.update_tooltip();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         ctx.request_repaint_after(Duration::from_secs(1));
 
         // Drag & drop
@@ -900,6 +1028,22 @@ impl AnyDropApp {
                         "묻지 않고 자동 수락 (신뢰하는 네트워크에서만)",
                     );
                     ui.end_row();
+
+                    if self.tray.is_some() {
+                        ui.label("트레이");
+                        ui.checkbox(
+                            &mut self.draft.minimize_to_tray,
+                            "창을 닫으면 트레이로 숨기기 (계속 받기)",
+                        );
+                        ui.end_row();
+
+                        ui.label("");
+                        ui.checkbox(
+                            &mut self.draft.start_hidden,
+                            "시작할 때 트레이로 숨긴 채 실행",
+                        );
+                        ui.end_row();
+                    }
                 });
             ui.separator();
             ui.horizontal(|ui| {
@@ -1003,6 +1147,50 @@ fn install_fonts(ctx: &egui::Context) {
             }
             ctx.set_fonts(fonts);
             return;
+        }
+    }
+}
+
+/// App / tray icon drawn in code (no asset files): blue disc with a white down arrow.
+pub(crate) fn app_icon_rgba(size: u32) -> (Vec<u8>, u32, u32) {
+    let n = size as f32;
+    let mut px = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let (u, v) = ((x as f32 + 0.5) / n, (y as f32 + 0.5) / n);
+            let d = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt();
+            // anti-aliased disc
+            let disc = ((0.48 - d) * n).clamp(0.0, 1.0);
+            if disc <= 0.0 {
+                continue;
+            }
+            let stem = (u - 0.5).abs() < 0.07 && (0.20..0.58).contains(&v);
+            let head = (0.50..=0.78).contains(&v) && (u - 0.5).abs() <= (0.78 - v) * 0.95;
+            let bar = (0.80..0.86).contains(&v) && (u - 0.5).abs() < 0.22;
+            let (r, g, b) = if stem || head || bar {
+                (255, 255, 255)
+            } else {
+                (0x2f, 0x80, 0xed)
+            };
+            let i = ((y * size + x) * 4) as usize;
+            px[i..i + 4].copy_from_slice(&[r, g, b, (disc * 255.0) as u8]);
+        }
+    }
+    (px, size, size)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn icon_shape() {
+        let (px, w, h) = super::app_icon_rgba(64);
+        assert_eq!((w, h, px.len()), (64, 64, 64 * 64 * 4));
+        let at = |x: u32, y: u32| &px[((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize];
+        assert_eq!(at(0, 0)[3], 0, "corner is transparent");
+        assert_eq!(at(32, 24), [255, 255, 255, 255], "arrow stem is white");
+        assert_eq!(at(10, 32)[..3], [0x2f, 0x80, 0xed], "disc is blue");
+        if let Ok(path) = std::env::var("ANYDROP_ICON_DUMP") {
+            std::fs::write(path, &px).unwrap();
         }
     }
 }
